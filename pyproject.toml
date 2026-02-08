@@ -1,0 +1,95 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "causal-forcing"
+version = "0.0.1"
+description = "Autoregressive Diffusion Distillation Done Right for High-Quality Real-Time Interactive Video Generation"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+    "accelerate>=1.1.1",
+    "av>=13.1.0",
+    "clip",
+    "dashscope>=1.25.3",
+    "diffusers>=0.31.0",
+    "dominate>=2.9.1",
+    "easydict>=1.13",
+    "einops>=0.8.1",
+    "flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.5cxx11abiFALSE-cp310-cp310-linux_x86_64.whl ; sys_platform == 'linux' and platform_machine == 'x86_64' and python_version == '3.10'",
+    "flask>=3.1.2",
+    "flask-socketio>=5.5.1",
+    "ftfy>=6.3.1",
+    "huggingface-hub[cli]>=0.36.0",
+    "imageio>=2.37.2",
+    "imageio-ffmpeg>=0.6.0",
+    "lmdb>=1.7.5",
+    "matplotlib>=3.10.7",
+    "ninja>=1.11.1",
+    "numpy>=1.24.4",
+    "omegaconf>=2.3.0",
+    "onnx>=1.20.0",
+    "onnxconverter-common>=1.16.0",
+    "onnxruntime>=1.23.2",
+    "onnxscript>=0.5.6",
+    "open-clip-torch>=3.2.0",
+    "opencv-python>=4.9.0.80",
+    "packaging>=25.0",
+    "pycocotools>=2.0.10",
+    "pydantic==2.10.6",
+    "scikit-image>=0.25.2",
+    "sentencepiece>=0.2.1",
+    "starlette>=0.50.0",
+    "tokenizers>=0.20.3",
+    "torch>=2.4.0",
+    "torchao==0.6.1",
+    "torchvision>=0.19.0",
+    "torchaudio>=2.4.0",
+    "tqdm>=4.67.1",
+    "transformers>=4.49.0",
+    "wandb>=0.23.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "black>=25.12.0",
+    "isort>=7.0.0",
+    "pytest>=9.0.2",
+    "ruff",
+]
+
+[tool.uv]
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+
+[[tool.uv.index]]
+name = "pytorch"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[[tool.uv.index]]
+name = "nvidia"
+url = "https://pypi.ngc.nvidia.com"
+
+[tool.uv.sources]
+torch = { index = "pytorch" }
+torchvision = { index = "pytorch" }
+torchaudio = { index = "pytorch" }
+clip = { git = "https://github.com/openai/CLIP.git" }
+
+[tool.hatch.build.targets.wheel]
+only-include = [
+    "model",
+    "pipeline",
+    "trainer",
+    "wan",
+    "utils",
+    "demo_utils",
+    "long_video",
+]
+
+[tool.hatch.metadata]
+allow-direct-references = true
