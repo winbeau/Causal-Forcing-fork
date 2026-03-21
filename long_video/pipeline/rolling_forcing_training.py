@@ -242,7 +242,7 @@ class RollingForcingTrainingPipeline:
                     kv_cache=self.kv_cache_clean,
                     crossattn_cache=self.crossattn_cache,
                     current_start=current_start_frame * self.frame_seq_length,
-                    updating_cache=True,
+                    cache_update_mode="clean",
                 )
 
         # Step 3.5: Return the denoised timestep
@@ -409,7 +409,7 @@ class RollingForcingTrainingPipeline:
                     kv_cache=self.kv_cache_clean,
                     crossattn_cache=self.crossattn_cache,
                     current_start=current_start_frame * self.frame_seq_length,
-                    updating_cache=True,
+                    cache_update_mode="clean",
                 )
 
             # Step 3.4: update the start and end frame indices

@@ -1,4 +1,5 @@
-from wan.modules.attention import attention
+from wan.modules.attention import attention, headkv_attention
+from headkv.cache import HeadKVCache
 from wan.modules.model import (
     WanRMSNorm,
     rope_apply,
@@ -94,7 +95,8 @@ class CausalWanSelfAttention(nn.Module):
         kv_cache=None,
         current_start=0,
         cache_start=None,
-        updating_cache=False
+        prompt_v=None,
+        cache_update_mode="default"
     ):
         r"""
         Args:
@@ -103,6 +105,8 @@ class CausalWanSelfAttention(nn.Module):
             grid_sizes(Tensor): Shape [B, 3], the second dimension contains (F, H, W)
             freqs(Tensor): Rope freqs, shape [1024, C / num_heads / 2]
             block_mask (BlockMask)
+            cache_update_mode(str): "default" for dict-based denoising pass,
+                "clean" for cache write, "noisy" for HeadKV read-only
         """
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
         if cache_start is None:
@@ -197,107 +201,146 @@ class CausalWanSelfAttention(nn.Module):
             current_start_frame = current_start // frame_seqlen
             roped_query = causal_rope_apply(
                 q, grid_sizes, freqs, start_frame=current_start_frame).type_as(v)   # [B, L, 12, 128]
-            roped_key = causal_rope_apply(
-                k, grid_sizes, freqs, start_frame=current_start_frame).type_as(v)   # [B, L, 12, 128]
-            
-            grid_sizes_one_block = grid_sizes.clone()
-            grid_sizes_one_block[:,0] = 3
 
-            # only caching the first block
-            cache_end = cache_start + self.block_length
-            num_new_tokens = cache_end - kv_cache["global_end_index"].item()
-            kv_cache_size = kv_cache["k"].shape[1]
-
-            sink_tokens = 1 * self.block_length # we keep the first block in the cache
-
-            if (num_new_tokens > 0) and (
-                    num_new_tokens + kv_cache["local_end_index"].item() > kv_cache_size):
-                num_evicted_tokens = num_new_tokens + kv_cache["local_end_index"].item() - kv_cache_size
-                num_rolled_tokens = kv_cache["local_end_index"].item() - num_evicted_tokens - sink_tokens
-                kv_cache["k"][:, sink_tokens:sink_tokens + num_rolled_tokens] = \
-                    kv_cache["k"][:, sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
-                kv_cache["v"][:, sink_tokens:sink_tokens + num_rolled_tokens] = \
-                    kv_cache["v"][:, sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
-                
-                local_end_index = kv_cache["local_end_index"].item() + cache_end - \
-                    kv_cache["global_end_index"].item() - num_evicted_tokens
-                local_start_index = local_end_index - self.block_length
-                kv_cache["k"][:, local_start_index:local_end_index] = roped_key[:, :self.block_length]
-                kv_cache["v"][:, local_start_index:local_end_index] = v[:, :self.block_length]
-            else:
-                local_end_index = kv_cache["local_end_index"].item() + cache_end - kv_cache["global_end_index"].item()
-                local_start_index = local_end_index - self.block_length
-                if local_start_index == 0: # first block is not roped in the cache
-                    kv_cache["k"][:, local_start_index:local_end_index] = k[:, :self.block_length]
+            if isinstance(kv_cache, HeadKVCache):
+                # HeadKV path: per-head adaptive varlen attention (drop-in)
+                if getattr(kv_cache, "post_prune_rope", False):
+                    # Post-prune RoPE: pass raw k, RoPE applied after pruning
+                    x = headkv_attention(
+                        q=roped_query,
+                        k=k,
+                        v=v,
+                        kv_cache=kv_cache,
+                        current_start=current_start,
+                        grid_sizes=grid_sizes,
+                        freqs=freqs,
+                        start_frame=current_start_frame,
+                        prompt_v=prompt_v,
+                        cache_update_mode=cache_update_mode,
+                        causal=False,
+                    )
                 else:
+                    # Pre-RoPE: apply RoPE to k before caching
+                    roped_key = causal_rope_apply(
+                        k, grid_sizes, freqs, start_frame=current_start_frame).type_as(v)
+                    x = headkv_attention(
+                        q=roped_query,
+                        k=roped_key,
+                        v=v,
+                        kv_cache=kv_cache,
+                        current_start=current_start,
+                        prompt_v=prompt_v,
+                        cache_update_mode=cache_update_mode,
+                        causal=False,
+                    )
+            else:
+                # Dict-based KV cache path (original logic)
+                updating_cache = (cache_update_mode == "clean")
+                roped_key = causal_rope_apply(
+                    k, grid_sizes, freqs, start_frame=current_start_frame).type_as(v)   # [B, L, 12, 128]
+
+                grid_sizes_one_block = grid_sizes.clone()
+                grid_sizes_one_block[:,0] = 3
+
+                # only caching the first block
+                cache_end = cache_start + self.block_length
+                num_new_tokens = cache_end - kv_cache["global_end_index"].item()
+                kv_cache_size = kv_cache["k"].shape[1]
+
+                sink_tokens = 1 * self.block_length # we keep the first block in the cache
+
+                if (num_new_tokens > 0) and (
+                        num_new_tokens + kv_cache["local_end_index"].item() > kv_cache_size):
+                    num_evicted_tokens = num_new_tokens + kv_cache["local_end_index"].item() - kv_cache_size
+                    num_rolled_tokens = kv_cache["local_end_index"].item() - num_evicted_tokens - sink_tokens
+                    kv_cache["k"][:, sink_tokens:sink_tokens + num_rolled_tokens] = (
+                        kv_cache["k"][:, sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
+                    )
+                    kv_cache["v"][:, sink_tokens:sink_tokens + num_rolled_tokens] = (
+                        kv_cache["v"][:, sink_tokens + num_evicted_tokens:sink_tokens + num_evicted_tokens + num_rolled_tokens].clone()
+                    )
+
+                    local_end_index = (
+                        kv_cache["local_end_index"].item() + cache_end -
+                        kv_cache["global_end_index"].item() - num_evicted_tokens
+                    )
+                    local_start_index = local_end_index - self.block_length
                     kv_cache["k"][:, local_start_index:local_end_index] = roped_key[:, :self.block_length]
-
-                kv_cache["v"][:, local_start_index:local_end_index] = v[:, :self.block_length]
-
-            if num_new_tokens > 0: # prevent updating when caching clean frame
-                kv_cache["global_end_index"].fill_(cache_end)
-                kv_cache["local_end_index"].fill_(local_end_index)
-
-            if local_start_index == 0:
-                # no kv attn with cache
-                x = attention(
-                    roped_query,
-                    roped_key,
-                    v)
-            else:
-                if updating_cache: # updating working cache with clean frame
-                    extract_cache_end = local_end_index
-                    extract_cache_start = max(0, local_end_index-self.max_attention_size)
-                    working_cache_key = kv_cache["k"][:, extract_cache_start:extract_cache_end].clone()
-                    working_cache_v = kv_cache["v"][:, extract_cache_start:extract_cache_end]
-
-                    if extract_cache_start == 0: # rope the global first block in working cache
-                        working_cache_key[:,:self.block_length] = causal_rope_apply(
-                            working_cache_key[:,:self.block_length], grid_sizes_one_block, freqs, start_frame=0).type_as(v)
-
-                    x = attention(
-                        roped_query,
-                        working_cache_key,
-                        working_cache_v
-                    )
-
+                    kv_cache["v"][:, local_start_index:local_end_index] = v[:, :self.block_length]
                 else:
-                    # 1. extract working cache
-                    # calculate the length of working cache
-                    query_length = roped_query.shape[1]
-                    working_cache_max_length = self.max_attention_size - query_length - self.block_length
+                    local_end_index = kv_cache["local_end_index"].item() + cache_end - kv_cache["global_end_index"].item()
+                    local_start_index = local_end_index - self.block_length
+                    if local_start_index == 0: # first block is not roped in the cache
+                        kv_cache["k"][:, local_start_index:local_end_index] = k[:, :self.block_length]
+                    else:
+                        kv_cache["k"][:, local_start_index:local_end_index] = roped_key[:, :self.block_length]
 
-                    extract_cache_end = local_start_index
-                    extract_cache_start = max(self.block_length, local_start_index - working_cache_max_length) # working cache does not include the first anchor block
-                    working_cache_key = kv_cache["k"][:, extract_cache_start:extract_cache_end]
-                    working_cache_v = kv_cache["v"][:, extract_cache_start:extract_cache_end]
+                    kv_cache["v"][:, local_start_index:local_end_index] = v[:, :self.block_length]
 
-                    # 2. extract anchor cache, roped as the past frame
-                    working_cache_frame_length = working_cache_key.shape[1] // self.frame_length
-                    rope_start_frame = current_start_frame - working_cache_frame_length - 3
+                if num_new_tokens > 0: # prevent updating when caching clean frame
+                    kv_cache["global_end_index"].fill_(cache_end)
+                    kv_cache["local_end_index"].fill_(local_end_index)
 
-                    anchor_cache_key = causal_rope_apply(
-                        kv_cache["k"][:, :self.block_length], grid_sizes_one_block, freqs, start_frame=rope_start_frame).type_as(v)
-                    anchor_cache_v = kv_cache["v"][:, :self.block_length]
-
-                    # 3. attention with working cache and anchor cache
-                    input_key = torch.cat([
-                        anchor_cache_key,
-                        working_cache_key,
-                        roped_key
-                    ], dim=1)
-
-                    input_v = torch.cat([
-                        anchor_cache_v,
-                        working_cache_v,
-                        v
-                    ], dim=1)
-
+                if local_start_index == 0:
+                    # no kv attn with cache
                     x = attention(
                         roped_query,
-                        input_key,
-                        input_v
-                    )
+                        roped_key,
+                        v)
+                else:
+                    if updating_cache: # updating working cache with clean frame
+                        extract_cache_end = local_end_index
+                        extract_cache_start = max(0, local_end_index-self.max_attention_size)
+                        working_cache_key = kv_cache["k"][:, extract_cache_start:extract_cache_end].clone()
+                        working_cache_v = kv_cache["v"][:, extract_cache_start:extract_cache_end]
+
+                        if extract_cache_start == 0: # rope the global first block in working cache
+                            working_cache_key[:,:self.block_length] = causal_rope_apply(
+                                working_cache_key[:,:self.block_length], grid_sizes_one_block, freqs, start_frame=0).type_as(v)
+
+                        x = attention(
+                            roped_query,
+                            working_cache_key,
+                            working_cache_v
+                        )
+
+                    else:
+                        # 1. extract working cache
+                        # calculate the length of working cache
+                        query_length = roped_query.shape[1]
+                        working_cache_max_length = self.max_attention_size - query_length - self.block_length
+
+                        extract_cache_end = local_start_index
+                        extract_cache_start = max(self.block_length, local_start_index - working_cache_max_length) # working cache does not include the first anchor block
+                        working_cache_key = kv_cache["k"][:, extract_cache_start:extract_cache_end]
+                        working_cache_v = kv_cache["v"][:, extract_cache_start:extract_cache_end]
+
+                        # 2. extract anchor cache, roped as the past frame
+                        working_cache_frame_length = working_cache_key.shape[1] // self.frame_length
+                        rope_start_frame = current_start_frame - working_cache_frame_length - 3
+
+                        anchor_cache_key = causal_rope_apply(
+                            kv_cache["k"][:, :self.block_length], grid_sizes_one_block, freqs, start_frame=rope_start_frame).type_as(v)
+                        anchor_cache_v = kv_cache["v"][:, :self.block_length]
+
+                        # 3. attention with working cache and anchor cache
+                        input_key = torch.cat([
+                            anchor_cache_key,
+                            working_cache_key,
+                            roped_key
+                        ], dim=1)
+
+                        input_v = torch.cat([
+                            anchor_cache_v,
+                            working_cache_v,
+                            v
+                        ], dim=1)
+
+                        x = attention(
+                            roped_query,
+                            input_key,
+                            input_v
+                        )
                  
 
         # output
@@ -356,7 +399,7 @@ class CausalWanAttentionBlock(nn.Module):
         context,
         context_lens,
         block_mask,
-        updating_cache=False,
+        cache_update_mode="default",
         kv_cache=None,
         crossattn_cache=None,
         current_start=0,
@@ -376,11 +419,31 @@ class CausalWanAttentionBlock(nn.Module):
         e = (self.modulation.unsqueeze(1) + e).chunk(6, dim=2)
         # assert e[0].dtype == torch.float32
 
+        prompt_v = None
+        if isinstance(kv_cache, HeadKVCache) and getattr(kv_cache, "post_prune_rope", False):
+            if getattr(kv_cache, "prompt_value_cache_enabled", False):
+                cached_prompt_v = None
+                if isinstance(crossattn_cache, dict):
+                    cached_prompt_v = crossattn_cache.get("prompt_v")
+                if cached_prompt_v is None:
+                    cached_prompt_v = self.cross_attn.v(context).view(
+                        context.shape[0], -1, self.num_heads, self.dim // self.num_heads
+                    )
+                    cached_prompt_v = cached_prompt_v.mean(dim=1)
+                    if isinstance(crossattn_cache, dict):
+                        crossattn_cache["prompt_v"] = cached_prompt_v
+                prompt_v = cached_prompt_v
+            else:
+                prompt_v = self.cross_attn.v(context).view(
+                    context.shape[0], -1, self.num_heads, self.dim // self.num_heads
+                )
+                prompt_v = prompt_v.mean(dim=1)
+
         # self-attention
         y = self.self_attn(
             (self.norm1(x).unflatten(dim=1, sizes=(num_frames, frame_seqlen)) * (1 + e[1]) + e[0]).flatten(1, 2),
             seq_lens, grid_sizes,
-            freqs, block_mask, kv_cache, current_start, cache_start, updating_cache=updating_cache)
+            freqs, block_mask, kv_cache, current_start, cache_start, prompt_v=prompt_v, cache_update_mode=cache_update_mode)
 
         # with amp.autocast(dtype=torch.float32):
         x = x + (y.unflatten(dim=1, sizes=(num_frames, frame_seqlen)) * e[2]).flatten(1, 2)
@@ -782,7 +845,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         t,
         context,
         seq_len,
-        updating_cache=False,
+        cache_update_mode="default",
         clip_fea=None,
         y=None,
         kv_cache: dict = None,
@@ -870,7 +933,7 @@ class CausalWanModel(ModelMixin, ConfigMixin):
             context=context,
             context_lens=context_lens,
             block_mask=self.block_mask,
-            updating_cache=updating_cache,
+            cache_update_mode=cache_update_mode,
         )
 
         def create_custom_forward(module):

@@ -226,7 +226,8 @@ class WanDiffusionWrapper(torch.nn.Module):
         clean_x: Optional[torch.Tensor] = None,
         aug_t: Optional[torch.Tensor] = None,
         cache_start: Optional[int] = None,
-        updating_cache: Optional[bool] = False
+        cache_update_mode: Optional[str] = "default",
+        skip_x0: bool = False,
     ) -> torch.Tensor:
         prompt_embeds = conditional_dict["prompt_embeds"]
 
@@ -247,7 +248,7 @@ class WanDiffusionWrapper(torch.nn.Module):
                 crossattn_cache=crossattn_cache,
                 current_start=current_start,
                 cache_start=cache_start,
-                updating_cache=updating_cache
+                cache_update_mode=cache_update_mode
             ).permute(0, 2, 1, 3, 4)
         else:
             if clean_x is not None:
@@ -278,6 +279,9 @@ class WanDiffusionWrapper(torch.nn.Module):
                         t=input_timestep, context=prompt_embeds,
                         seq_len=self.seq_len
                     ).permute(0, 2, 1, 3, 4)
+
+        if skip_x0:
+            return flow_pred, flow_pred  # skip x0 conversion for clean pass
 
         pred_x0 = self._convert_flow_pred_to_x0(
             flow_pred=flow_pred.flatten(0, 1),
