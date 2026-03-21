@@ -4,7 +4,7 @@ import time
 from typing import Optional
 
 import torch
-from torchvision.io import write_video
+import imageio
 from omegaconf import OmegaConf
 from einops import rearrange
 import gradio as gr
@@ -17,6 +17,18 @@ from pipeline import CausalDiffusionInferencePipeline, CausalInferencePipeline
 # -----------------------------
 _PIPELINE: Optional[torch.nn.Module] = None
 _DEVICE: Optional[torch.device] = None
+
+
+def save_video(path: str, frames: torch.Tensor, fps: int = 16) -> None:
+    frames_np = frames.clamp(0, 255).to(torch.uint8).cpu().numpy()
+    imageio.mimwrite(
+        path,
+        frames_np,
+        fps=fps,
+        codec="libx264",
+        quality=8,
+        output_params=["-loglevel", "error"],
+    )
 
 
 def _ensure_gpu():
@@ -109,7 +121,7 @@ def build_predict(config_path: str, checkpoint_path: Optional[str], output_dir: 
         safe_stub = prompt[:60].replace(' ', '_').replace('/', '_')
         ts = int(time.time())
         filepath = os.path.join(output_dir, f"{safe_stub or 'video'}_{ts}.mp4")
-        write_video(filepath, video_uint8, fps=16)
+        save_video(filepath, video_uint8, fps=16)
         print(f"Saved generated video to {filepath}")
 
         return filepath

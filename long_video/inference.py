@@ -5,7 +5,6 @@ from omegaconf import OmegaConf
 from collections import OrderedDict
 from tqdm import tqdm
 from torchvision import transforms
-from torchvision.io import write_video
 from einops import rearrange
 import torch.distributed as dist
 import imageio
@@ -111,6 +110,18 @@ if dist.is_initialized():
     dist.barrier()
 
 
+def save_video(path: str, frames: torch.Tensor, fps: int = 16) -> None:
+    frames_np = frames.clamp(0, 255).to(torch.uint8).cpu().numpy()
+    imageio.mimwrite(
+        path,
+        frames_np,
+        fps=fps,
+        codec="libx264",
+        quality=8,
+        output_params=["-loglevel", "error"],
+    )
+
+
 def encode(self, videos: torch.Tensor) -> torch.Tensor:
     device, dtype = videos[0].device, videos[0].dtype
     scale = [self.mean.to(device=device, dtype=dtype),
@@ -192,6 +203,5 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=(local_rank != 0)):
                 output_path = os.path.join(args.output_folder, f'{idx}-{seed_idx}_{model}.mp4')
             else:
                 output_path = os.path.join(args.output_folder, f'{prompt[:100]}-{seed_idx}.mp4')
-            write_video(output_path, video[seed_idx], fps=16)
-            # imageio.mimwrite(output_path, video[seed_idx], fps=16, quality=8, output_params=["-loglevel", "error"])
+            save_video(output_path, video[seed_idx], fps=16)
     
