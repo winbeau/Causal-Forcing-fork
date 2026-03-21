@@ -1345,7 +1345,14 @@ class AdaptiveKVCache(HeadKVCache):
             if prompt_per_head is not None:
                 prompt_head = prompt_per_head[head_idx]
 
-            if self.use_osc_frame_mode and cache_update_mode in {"default", "clean"}:
+            allow_middle_strategy_update = not (
+                cache_update_mode == "clean" and overwrite_current_block
+            )
+            if (
+                self.use_osc_frame_mode
+                and cache_update_mode in {"default", "clean"}
+                and allow_middle_strategy_update
+            ):
                 composition = (
                     self.compositions_row[head_idx]
                     if self.compositions_row is not None and head_idx < len(self.compositions_row)
