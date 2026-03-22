@@ -29,6 +29,8 @@ parser.add_argument("--output_folder", type=str, help="Output folder")
 parser.add_argument("--num_output_frames", type=int, default=21, help="Number of overlap frames between sliding windows")
 parser.add_argument("--use_ema", action="store_true", help="Whether to use EMA parameters")
 parser.add_argument("--seed", type=int, default=0, help="Random seed")
+parser.add_argument("--save_with_index", action="store_true", help="Save videos as video_000.mp4 instead of prompt-based names")
+parser.add_argument("--start_index", type=int, default=0, help="Starting index for index-based naming")
 args = parser.parse_args()
 
 # Initialize distributed inference
@@ -131,7 +133,10 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=(local_rank != 0)):
     
     # For text-to-video, batch is just the text prompt
     prompt = batch['prompts'][0]
-    output_path = os.path.join(args.output_folder, f'{prompt[:100]}.mp4')
+    if args.save_with_index:
+        output_path = os.path.join(args.output_folder, f'video_{args.start_index + i:03d}.mp4')
+    else:
+        output_path = os.path.join(args.output_folder, f'{prompt[:100]}.mp4')
     if os.path.exists(output_path):
         print('Video has been generated. Pass!')
         continue
@@ -164,7 +169,10 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=(local_rank != 0)):
     # Clear VAE cache
     pipeline.vae.model.clear_cache()
 
-    output_path = os.path.join(args.output_folder, f'{prompt[:100]}.mp4')
+    if args.save_with_index:
+        output_path = os.path.join(args.output_folder, f'video_{args.start_index + i:03d}.mp4')
+    else:
+        output_path = os.path.join(args.output_folder, f'{prompt[:100]}.mp4')
     write_video(output_path, video[0], fps=16)
 
        
