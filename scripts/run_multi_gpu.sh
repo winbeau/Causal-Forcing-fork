@@ -2,15 +2,16 @@
 set -euo pipefail
 
 # ============================================================
-# Multi-GPU Parallel Inference Script
+# Multi-GPU Parallel Inference Script (Long Video)
+# Core: long_video/inference.py with Rolling Forcing
 # Splits prompts across GPUs, each GPU runs inference independently
 # ============================================================
 
 # Defaults
 OUTPUT_DIR=""
-CONFIG_PATH="configs/causal_forcing_dmd_chunkwise.yaml"
-CHECKPOINT_PATH="checkpoints/chunkwise/causal_forcing.pt"
-NUM_FRAMES=21
+CONFIG_PATH="long_video/configs/rolling_forcing_dmd.yaml"
+CHECKPOINT_PATH="checkpoints/chunkwise/longvideo.pt"
+NUM_FRAMES=126
 PROMPT_FILE="prompts/MovieGenVideoBench_num128.txt"
 GPUS=""
 SEED=0
@@ -26,7 +27,8 @@ Required:
 Options:
   -c, --config PATH          YAML config path (default: $CONFIG_PATH)
   -p, --checkpoint PATH      Checkpoint path (default: $CHECKPOINT_PATH)
-  -n, --num_frames N         Number of output frames (default: $NUM_FRAMES)
+  -n, --num_frames N         Number of output latent frames (default: $NUM_FRAMES)
+                             21 -> ~5s, 63 -> ~16s, 126 -> ~31s, 252 -> ~63s
   -d, --prompts PATH         Prompt file (default: $PROMPT_FILE)
   -g, --gpus IDS             Comma-separated GPU IDs (default: auto-detect)
   -s, --seed N               Random seed (default: $SEED)
@@ -102,12 +104,12 @@ mkdir -p "$OUTPUT_DIR"
 } > "$OUTPUT_DIR/prompts.csv"
 
 echo "============================================================"
-echo "Multi-GPU Inference"
+echo "Multi-GPU Long Video Inference (Rolling Forcing)"
 echo "  Config:     $CONFIG_PATH"
 echo "  Checkpoint: $CHECKPOINT_PATH"
 echo "  Prompts:    $PROMPT_FILE ($TOTAL prompts)"
 echo "  GPUs:       $GPUS ($NUM_GPUS GPUs)"
-echo "  Frames:     $NUM_FRAMES"
+echo "  Frames:     $NUM_FRAMES latent frames"
 echo "  Output:     $OUTPUT_DIR"
 echo "============================================================"
 
@@ -151,7 +153,7 @@ for i in "${!GPU_ARRAY[@]}"; do
 
     echo "  GPU $GPU: prompts $GLOBAL_INDEX-$((GLOBAL_INDEX + COUNT - 1)) ($COUNT prompts)"
 
-    CUDA_VISIBLE_DEVICES="$GPU" python inference.py \
+    CUDA_VISIBLE_DEVICES="$GPU" python long_video/inference.py \
         --config_path "$CONFIG_PATH" \
         --checkpoint_path "$CHECKPOINT_PATH" \
         --data_path "$TEMP_FILE" \
