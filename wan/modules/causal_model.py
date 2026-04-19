@@ -1,4 +1,5 @@
-from wan.modules.attention import attention
+from wan.modules.attention import attention, headkv_attention
+from headkv.cache import HeadKVCache
 from wan.modules.model import (
     WanRMSNorm,
     rope_apply,
@@ -96,7 +97,9 @@ class CausalWanSelfAttention(nn.Module):
         block_mask,
         kv_cache=None,
         current_start=0,
-        cache_start=None
+        cache_start=None,
+        prompt_v=None,
+        cache_update_mode="default",
     ):
         r"""
         Args:
@@ -199,6 +202,43 @@ class CausalWanSelfAttention(nn.Module):
             current_start_frame = current_start // frame_seqlen
             roped_query = causal_rope_apply(
                 q, grid_sizes, freqs, start_frame=current_start_frame).type_as(v)
+
+            if isinstance(kv_cache, HeadKVCache):
+                # Pyramid-Forcing / HeadKV path: per-head adaptive KV cache via varlen flash-attn.
+                # Branch on post_prune_rope so pre-RoPE K is stored when dynamic RoPE is applied
+                # inside the cache (AdaptiveKVCache with sink_grid_decoupling).
+                if getattr(kv_cache, "post_prune_rope", False):
+                    x = headkv_attention(
+                        q=roped_query,
+                        k=k,
+                        v=v,
+                        kv_cache=kv_cache,
+                        current_start=current_start,
+                        grid_sizes=grid_sizes,
+                        freqs=freqs,
+                        start_frame=current_start_frame,
+                        prompt_v=prompt_v,
+                        cache_update_mode=cache_update_mode,
+                        causal=False,
+                    )
+                else:
+                    roped_key = causal_rope_apply(
+                        k, grid_sizes, freqs, start_frame=current_start_frame).type_as(v)
+                    x = headkv_attention(
+                        q=roped_query,
+                        k=roped_key,
+                        v=v,
+                        kv_cache=kv_cache,
+                        current_start=current_start,
+                        prompt_v=prompt_v,
+                        cache_update_mode=cache_update_mode,
+                        causal=False,
+                    )
+                # output
+                x = x.flatten(2)
+                x = self.o(x)
+                return x
+
             roped_key = causal_rope_apply(
                 k, grid_sizes, freqs, start_frame=current_start_frame).type_as(v)
 
@@ -298,7 +338,8 @@ class CausalWanAttentionBlock(nn.Module):
         kv_cache=None,
         crossattn_cache=None,
         current_start=0,
-        cache_start=None
+        cache_start=None,
+        cache_update_mode="default",
     ):
         r"""
         Args:
@@ -314,11 +355,32 @@ class CausalWanAttentionBlock(nn.Module):
         e = (self.modulation.unsqueeze(1) + e).chunk(6, dim=2)
         # assert e[0].dtype == torch.float32
 
+        prompt_v = None
+        if isinstance(kv_cache, HeadKVCache) and getattr(kv_cache, "post_prune_rope", False):
+            if getattr(kv_cache, "prompt_value_cache_enabled", False):
+                cached_prompt_v = None
+                if isinstance(crossattn_cache, dict):
+                    cached_prompt_v = crossattn_cache.get("prompt_v")
+                if cached_prompt_v is None:
+                    cached_prompt_v = self.cross_attn.v(context).view(
+                        context.shape[0], -1, self.num_heads, self.dim // self.num_heads
+                    )
+                    cached_prompt_v = cached_prompt_v.mean(dim=1)
+                    if isinstance(crossattn_cache, dict):
+                        crossattn_cache["prompt_v"] = cached_prompt_v
+                prompt_v = cached_prompt_v
+            else:
+                prompt_v = self.cross_attn.v(context).view(
+                    context.shape[0], -1, self.num_heads, self.dim // self.num_heads
+                )
+                prompt_v = prompt_v.mean(dim=1)
+
         # self-attention
         y = self.self_attn(
             (self.norm1(x).unflatten(dim=1, sizes=(num_frames, frame_seqlen)) * (1 + e[1]) + e[0]).flatten(1, 2),
             seq_lens, grid_sizes,
-            freqs, block_mask, kv_cache, current_start, cache_start)
+            freqs, block_mask, kv_cache, current_start, cache_start,
+            prompt_v=prompt_v, cache_update_mode=cache_update_mode)
 
         # with amp.autocast(dtype=torch.float32):
         x = x + (y.unflatten(dim=1, sizes=(num_frames, frame_seqlen)) * e[2]).flatten(1, 2)
@@ -725,7 +787,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
         kv_cache: dict = None,
         crossattn_cache: dict = None,
         current_start: int = 0,
-        cache_start: int = 0
+        cache_start: int = 0,
+        cache_update_mode: str = "default",
     ):
         r"""
         Run the diffusion model with kv caching.
@@ -820,7 +883,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                     {
                         "kv_cache": kv_cache[block_index],
                         "current_start": current_start,
-                        "cache_start": cache_start
+                        "cache_start": cache_start,
+                        "cache_update_mode": cache_update_mode,
                     }
                 )
                 x = torch.utils.checkpoint.checkpoint(
@@ -834,7 +898,8 @@ class CausalWanModel(ModelMixin, ConfigMixin):
                         "kv_cache": kv_cache[block_index],
                         "crossattn_cache": crossattn_cache[block_index],
                         "current_start": current_start,
-                        "cache_start": cache_start
+                        "cache_start": cache_start,
+                        "cache_update_mode": cache_update_mode,
                     }
                 )
                 x = block(x, **kwargs)
