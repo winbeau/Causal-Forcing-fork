@@ -31,6 +31,7 @@ parser.add_argument("--use_ema", action="store_true", help="Whether to use EMA p
 parser.add_argument("--seed", type=int, default=0, help="Random seed")
 parser.add_argument("--save_with_index", action="store_true", help="Save videos as video_000.mp4 instead of prompt-based names")
 parser.add_argument("--start_index", type=int, default=0, help="Starting index for index-based naming")
+parser.add_argument("--profile", action="store_true", help="Print CUDA timing for latent inference and VAE decoding")
 args = parser.parse_args()
 
 # Initialize distributed inference
@@ -156,7 +157,8 @@ for i, batch_data in tqdm(enumerate(dataloader), disable=(local_rank != 0)):
         noise=sampled_noise,
         text_prompts=prompts,
         return_latents=True,
-        initial_latent=initial_latent
+        initial_latent=initial_latent,
+        profile=args.profile
     )
     current_video = rearrange(video, 'b t c h w -> b t h w c').cpu()
     all_video.append(current_video)
